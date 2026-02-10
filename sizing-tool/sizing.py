@@ -236,7 +236,7 @@ def parse_compression_csv(csv_filepath):
                 coll_name = row['collName']
                 num_docs = int(row['numDocs'])
                 avg_doc_size = int(row['avgDocSize'])
-                comp_ratio = float(row['compRatio'])
+                comp_ratio = float(row['projectedCompRatio'])
                 
                 key = f"{db_name}.{coll_name}"
                 comp_data[key] = {

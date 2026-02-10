@@ -144,7 +144,7 @@ class TestParseCompressionCsv(unittest.TestCase):
         csv_content = """compressor,docsSampled,dictDocsSampled,dictBytes
 zstd-5-dict,1000,100,4096
 
-dbName,collName,numDocs,avgDocSize,sizeGB,storageGB,compRatio,compEnabled,minSample,maxSample,avgSample,minComp,maxComp,avgComp,compRatio,exceptions,compTime(ms)
+dbName,collName,numDocs,avgDocSize,sizeGB,storageGB,existingCompRatio,compEnabled,minSample,maxSample,avgSample,minComp,maxComp,avgComp,projectedCompRatio,exceptions,compTime(ms)
 testdb,users,10000,512,5.0,2.5,2.0,Y/1024,256,1024,512,128,512,256,2.0,0,123.45
 testdb,orders,5000,1024,5.0,2.0,2.5,Y/1024,512,2048,1024,256,1024,512,2.0,0,234.56
 """
@@ -195,7 +195,7 @@ testdb,users,10000,512,5.0,2.5,2.0,Y/1024,256,1024,512,128,512,256,2.0,0,123.45
         csv_content = """compressor,docsSampled,dictDocsSampled,dictBytes
 zstd-5-dict,1000,100,4096
 
-dbName,collName,numDocs,avgDocSize,sizeGB,storageGB,compRatio,compEnabled,minSample,maxSample,avgSample,minComp,maxComp,avgComp,compRatio,exceptions,compTime(ms)
+dbName,collName,numDocs,avgDocSize,sizeGB,storageGB,existingCompRatio,compEnabled,minSample,maxSample,avgSample,minComp,maxComp,avgComp,projectedCompRatio,exceptions,compTime(ms)
 testdb,users,10000,512,5.0,2.5,2.0,Y/1024,256,1024,512,128,512,256,2.0,0,123.45
 testdb,invalid,not_a_number,512,5.0,2.5,2.0,Y/1024,256,1024,512,128,512,256,2.0,0,123.45
 testdb,orders,5000,1024,5.0,2.0,2.5,Y/1024,512,2048,1024,256,1024,512,2.0,0,234.56
@@ -220,7 +220,7 @@ testdb,orders,5000,1024,5.0,2.0,2.5,Y/1024,512,2048,1024,256,1024,512,2.0,0,234.
         csv_content = """compressor,docsSampled,dictDocsSampled,dictBytes
 zstd-5-dict,1000,100,4096
 
-dbName,collName,numDocs,avgDocSize,sizeGB,storageGB,compRatio,compEnabled,minSample,maxSample,avgSample,minComp,maxComp,avgComp,compRatio,exceptions,compTime(ms)
+dbName,collName,numDocs,avgDocSize,sizeGB,storageGB,existingCompRatio,compEnabled,minSample,maxSample,avgSample,minComp,maxComp,avgComp,projectedCompRatio,exceptions,compTime(ms)
 """
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv') as f:
             f.write(csv_content)
