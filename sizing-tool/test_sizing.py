@@ -1,8 +1,19 @@
 """
 Unit tests for sizing.py
 
-Run with: python -m unittest test_sizing.py
-Or: python test_sizing.py
+Prerequisites:
+    - Python 3.7+
+    - No external dependencies (uses unittest.mock for all external calls)
+    - Tests do not require MongoDB or compression-review.py
+
+Run with:
+    python -m unittest test_sizing.py          # Run all tests
+    python -m unittest test_sizing.py -v       # Verbose output
+    python test_sizing.py                      # Alternative method
+    
+Run specific tests:
+    python -m unittest test_sizing.TestValidateArgs                    # Run one test class
+    python -m unittest test_sizing.TestValidateArgs.test_valid_args    # Run one test
 """
 import unittest
 import os
@@ -18,7 +29,8 @@ from sizing import (
     validate_args,
     parse_compression_csv,
     run_compression_and_get_output,
-    generate_sizing_csv
+    generate_sizing_csv,
+    load_compression_module
 )
 
 
@@ -221,14 +233,71 @@ dbName,collName,numDocs,avgDocSize,sizeGB,storageGB,compRatio,compEnabled,minSam
             os.unlink(temp_file)
 
 
+class TestLoadCompressionModule(unittest.TestCase):
+    """Tests for load_compression_module function"""
+    
+    def test_load_module_file_not_found(self):
+        """Test that missing compression module raises RuntimeError"""
+        with patch('sizing.os.path.exists', return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "Compression module not found"):
+                load_compression_module()
+    
+    def test_load_module_path_is_directory(self):
+        """Test that directory path raises RuntimeError"""
+        with patch('sizing.os.path.exists', return_value=True):
+            with patch('sizing.os.path.isfile', return_value=False):
+                with self.assertRaisesRegex(RuntimeError, "Path exists but is not a file"):
+                    load_compression_module()
+    
+    def test_load_module_invalid_spec(self):
+        """Test that invalid module spec raises RuntimeError"""
+        with patch('sizing.os.path.exists', return_value=True):
+            with patch('sizing.os.path.isfile', return_value=True):
+                with patch('sizing.importlib.util.spec_from_file_location', return_value=None):
+                    with self.assertRaisesRegex(RuntimeError, "Failed to create module spec"):
+                        load_compression_module()
+    
+    def test_load_module_missing_getdata_function(self):
+        """Test that module without getData function raises RuntimeError"""
+        mock_module = MagicMock()
+        del mock_module.getData  # Remove the getData attribute
+        
+        with patch('sizing.os.path.exists', return_value=True):
+            with patch('sizing.os.path.isfile', return_value=True):
+                with patch('sizing.importlib.util.spec_from_file_location') as mock_spec_from_file:
+                    mock_spec = MagicMock()
+                    mock_spec_from_file.return_value = mock_spec
+                    with patch('sizing.importlib.util.module_from_spec', return_value=mock_module):
+                        with self.assertRaisesRegex(RuntimeError, "missing required 'getData' function"):
+                            load_compression_module()
+    
+    def test_load_module_success(self):
+        """Test successful module loading"""
+        mock_module = MagicMock()
+        mock_module.getData = MagicMock()
+        
+        with patch('sizing.os.path.exists', return_value=True):
+            with patch('sizing.os.path.isfile', return_value=True):
+                with patch('sizing.importlib.util.spec_from_file_location') as mock_spec_from_file:
+                    mock_spec = MagicMock()
+                    mock_spec_from_file.return_value = mock_spec
+                    with patch('sizing.importlib.util.module_from_spec', return_value=mock_module):
+                        result = load_compression_module()
+                        self.assertEqual(result, mock_module)
+                        self.assertTrue(hasattr(result, 'getData'))
+
+
 class TestRunCompressionAndGetOutput(unittest.TestCase):
     """Tests for run_compression_and_get_output function"""
     
-    @patch('sizing.compression_module')
+    @patch('sizing.load_compression_module')
     @patch('sizing.glob.glob')
-    def test_successful_compression_run(self, mock_glob, mock_compression_module):
+    def test_successful_compression_run(self, mock_glob, mock_load_compression):
         """Test successful compression analysis run"""
         # Setup mocks
+        mock_compression_module = MagicMock()
+        mock_load_compression.return_value = mock_compression_module
+        
         mock_glob.side_effect = [
             [],  # No existing files
             ['temp-20260209120000-compression-review.csv']  # New file created
@@ -243,12 +312,16 @@ class TestRunCompressionAndGetOutput(unittest.TestCase):
         
         self.assertEqual(result, 'temp-20260209120000-compression-review.csv')
         mock_compression_module.getData.assert_called_once()
+        mock_load_compression.assert_called_once()
     
-    @patch('sizing.compression_module')
+    @patch('sizing.load_compression_module')
     @patch('sizing.glob.glob')
-    def test_compression_run_with_existing_files(self, mock_glob, mock_compression_module):
+    def test_compression_run_with_existing_files(self, mock_glob, mock_load_compression):
         """Test compression run when old files exist"""
         # Setup mocks
+        mock_compression_module = MagicMock()
+        mock_load_compression.return_value = mock_compression_module
+        
         mock_glob.side_effect = [
             ['temp-20260209110000-compression-review.csv'],  # Existing file
             [
@@ -266,11 +339,14 @@ class TestRunCompressionAndGetOutput(unittest.TestCase):
         
         self.assertEqual(result, 'temp-20260209120000-compression-review.csv')
     
-    @patch('sizing.compression_module')
+    @patch('sizing.load_compression_module')
     @patch('sizing.glob.glob')
-    def test_compression_run_no_file_created(self, mock_glob, mock_compression_module):
+    def test_compression_run_no_file_created(self, mock_glob, mock_load_compression):
         """Test error when no CSV file is created"""
-        # Setup mocks - no new files
+        # Setup mocks
+        mock_compression_module = MagicMock()
+        mock_load_compression.return_value = mock_compression_module
+        
         mock_glob.side_effect = [[], []]
         
         with self.assertRaisesRegex(RuntimeError, "No new CSV file created"):
@@ -281,12 +357,15 @@ class TestRunCompressionAndGetOutput(unittest.TestCase):
                 dictionary_size=4096
             )
     
-    @patch('sizing.compression_module')
+    @patch('sizing.load_compression_module')
     @patch('sizing.glob.glob')
-    def test_compression_run_failure(self, mock_glob, mock_compression_module):
+    def test_compression_run_failure(self, mock_glob, mock_load_compression):
         """Test error handling when compression analysis fails"""
-        mock_glob.return_value = []
+        mock_compression_module = MagicMock()
         mock_compression_module.getData.side_effect = Exception("Connection failed")
+        mock_load_compression.return_value = mock_compression_module
+        
+        mock_glob.return_value = []
         
         with self.assertRaisesRegex(RuntimeError, "Error running compression analysis"):
             run_compression_and_get_output(
@@ -296,12 +375,15 @@ class TestRunCompressionAndGetOutput(unittest.TestCase):
                 dictionary_size=4096
             )
     
-    @patch('sizing.compression_module')
+    @patch('sizing.load_compression_module')
     @patch('sizing.glob.glob')
     @patch('sizing.os.path.getmtime')
-    def test_multiple_new_files_created(self, mock_getmtime, mock_glob, mock_compression_module):
+    def test_multiple_new_files_created(self, mock_getmtime, mock_glob, mock_load_compression):
         """Test handling when multiple new files are created"""
         # Setup mocks
+        mock_compression_module = MagicMock()
+        mock_load_compression.return_value = mock_compression_module
+        
         mock_glob.side_effect = [
             [],  # No existing files
             [
@@ -328,6 +410,19 @@ class TestRunCompressionAndGetOutput(unittest.TestCase):
         
         # Should return the most recent file
         self.assertEqual(result, 'temp-20260209120001-compression-review.csv')
+    
+    @patch('sizing.load_compression_module')
+    def test_compression_module_load_failure(self, mock_load_compression):
+        """Test error handling when compression module fails to load"""
+        mock_load_compression.side_effect = RuntimeError("Compression module not found")
+        
+        with self.assertRaisesRegex(RuntimeError, "Compression module not found"):
+            run_compression_and_get_output(
+                uri='mongodb://localhost:27017',
+                sample_size=1000,
+                dictionary_sample_size=100,
+                dictionary_size=4096
+            )
 
 
 class TestGenerateSizingCsv(unittest.TestCase):

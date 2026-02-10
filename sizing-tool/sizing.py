@@ -50,20 +50,85 @@ import datetime as dt
 import pymongo
 import importlib.util
 
-# Load the compression-review.py module using importlib
-script_dir = os.path.dirname(os.path.abspath(__file__))
-compression_script = os.path.join(script_dir, '..', 'performance', 'compression-review', 'compression-review.py')
-
-spec = importlib.util.spec_from_file_location("compression_review", compression_script)
-compression_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(compression_module)
-
 # Compressor to use for compression analysis
 # zstd-5-dict matches Amazon DocumentDB 8.0 dictionary-based compression
 COMPRESSOR = 'zstd-5-dict'
 
-# Server alias for output file naming
-SERVER_ALIAS = 'temp'
+# Server alias base for output file naming
+SERVER_ALIAS_BASE = 'temp'
+
+
+def load_compression_module():
+    """
+    Load the compression-review.py module dynamically.
+    
+    Returns:
+        module: The loaded compression_review module
+        
+    Raises:
+        RuntimeError: If the compression-review.py file does not exist or cannot be loaded
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    compression_script = os.path.join(
+        script_dir, '..', 'performance', 'compression-review', 'compression-review.py'
+    )
+    
+    # Check if the file exists
+    if not os.path.exists(compression_script):
+        raise RuntimeError(
+            f"Compression module not found at: {compression_script}\n"
+            f"Expected location: ../performance/compression-review/compression-review.py\n"
+            f"Please ensure the compression-review tool is available in the correct directory."
+        )
+    
+    # Check if it's a file (not a directory)
+    if not os.path.isfile(compression_script):
+        raise RuntimeError(
+            f"Path exists but is not a file: {compression_script}\n"
+            f"Expected a Python script at this location."
+        )
+    
+    try:
+        spec = importlib.util.spec_from_file_location("compression_review", compression_script)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(
+                f"Failed to create module spec for: {compression_script}\n"
+                f"The file may not be a valid Python module."
+            )
+        
+        compression_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(compression_module)
+        
+        # Verify the module has the required getData function
+        if not hasattr(compression_module, 'getData'):
+            raise RuntimeError(
+                f"Compression module loaded but missing required 'getData' function.\n"
+                f"The compression-review.py file may be corrupted or outdated."
+            )
+        
+        return compression_module
+        
+    except Exception as e:
+        if isinstance(e, RuntimeError):
+            raise
+        raise RuntimeError(
+            f"Error loading compression module from {compression_script}: {e}"
+        )
+
+
+def cleanup_csv_files(csv_files):
+    """
+    Remove CSV files and log any errors.
+    
+    Args:
+        csv_files: Iterable of CSV file paths to remove
+    """
+    for csv_file in csv_files:
+        try:
+            os.remove(csv_file)
+            print(f"Cleaned up partial file: {csv_file}", file=sys.stderr)
+        except Exception as e:
+            print(f"Warning: Could not remove file {csv_file}: {e}", file=sys.stderr)
 
 
 def run_compression_and_get_output(uri, sample_size, dictionary_sample_size, dictionary_size):
@@ -84,14 +149,20 @@ def run_compression_and_get_output(uri, sample_size, dictionary_sample_size, dic
     """
     print("Running compression analysis...")
     
+    # Load the compression module
+    compression_module = load_compression_module()
+    
+    # Create server alias with PID for concurrency safety
+    server_alias = f"{SERVER_ALIAS_BASE}-{os.getpid()}"
+    
     # Get list of existing CSV files before running compression analysis
-    csv_pattern = f"{SERVER_ALIAS}-*-compression-review.csv"
+    csv_pattern = f"{server_alias}-*-compression-review.csv"
     existing_csv_files = set(glob.glob(csv_pattern))
     
     # Configure and run compression analysis
     app_config = {
         'uri': uri,
-        'serverAlias': SERVER_ALIAS,
+        'serverAlias': server_alias,
         'sampleSize': sample_size,
         'compressor': COMPRESSOR,
         'dictionarySampleSize': dictionary_sample_size,
@@ -101,6 +172,11 @@ def run_compression_and_get_output(uri, sample_size, dictionary_sample_size, dic
     try:
         compression_module.getData(app_config)
     except Exception as e:
+        # Clean up any partial CSV files that may have been created
+        current_csv_files = set(glob.glob(csv_pattern))
+        new_csv_files = current_csv_files - existing_csv_files
+        if new_csv_files:
+            cleanup_csv_files(new_csv_files)
         raise RuntimeError(f"Error running compression analysis: {e}")
     
     # Find the newly created CSV file by comparing before and after
@@ -111,7 +187,7 @@ def run_compression_and_get_output(uri, sample_size, dictionary_sample_size, dic
         raise RuntimeError(f"No new CSV file created. Expected pattern: {csv_pattern}")
     
     if len(new_csv_files) > 1:
-        print(f"Warning: Multiple new CSV files found: {new_csv_files}")
+        print(f"Warning: Multiple new CSV files found: {new_csv_files}", file=sys.stderr)
         # Use the most recent one
         latest_csv = max(new_csv_files, key=os.path.getmtime)
     else:
@@ -172,7 +248,7 @@ def parse_compression_csv(csv_filepath):
                 }
             except (KeyError, ValueError) as e:
                 # Skip rows with missing columns or invalid data
-                print(f"Warning: Skipping row due to error: {e}")
+                print(f"Warning: Skipping row due to error: {e}", file=sys.stderr)
                 continue
     
     return comp_data
@@ -195,7 +271,7 @@ def generate_sizing_csv(comp_data, uri):
     log_timestamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d%H%M%S')
     output_filename = f"sizing-{log_timestamp}.csv"
     
-    with pymongo.MongoClient(host=uri, appname='workload-calc') as client:
+    with pymongo.MongoClient(host=uri, appname='workload-calc', serverSelectionTimeoutMS=5000) as client:
         with open(output_filename, 'w', newline='') as csvfile:
             csvwriter = csv.writer(csvfile)
             
@@ -240,7 +316,7 @@ def generate_sizing_csv(comp_data, uri):
                         db_name,
                         coll_name,
                         doc_count,
-                        f"{avg_doc_size:.2f}",
+                        avg_doc_size,
                         total_indexes,
                         f"{index_size_gb:.4f}",
                         index_working_set,
@@ -255,7 +331,7 @@ def generate_sizing_csv(comp_data, uri):
                     sl_no += 1
                     
                 except Exception as e:
-                    print(f"Error processing {db_name}.{coll_name}: {e}")
+                    print(f"Error processing {db_name}.{coll_name}: {e}", file=sys.stderr)
                     continue
     
     return output_filename
@@ -324,53 +400,48 @@ def main():
         validate_args(args)
     except ValueError as e:
         parser.error(str(e))
-        return
     
-    # Run compression analysis and get the output CSV file
+    compression_csv = None  # Initialize to handle cleanup in finally
+    
     try:
+        # Run compression analysis and get the output CSV file
         compression_csv = run_compression_and_get_output(
             uri=args.uri,
             sample_size=args.sample_size,
             dictionary_sample_size=args.dictionary_sample_size,
             dictionary_size=args.dictionary_size
         )
-    except RuntimeError as e:
-        print(str(e))
-        return
-    
-    # Parse compression CSV to extract collection data
-    try:
+        
+        # Parse compression CSV to extract collection data
         comp_data = parse_compression_csv(compression_csv)
+        
+        # Generate sizing CSV by combining compression data with MongoDB stats
+        output_filename = generate_sizing_csv(comp_data, args.uri)
+        
+        print(f"\nSizing CSV generated: {output_filename}")
+        print("\n" + "="*80)
+        print("IMPORTANT: Manual Updates Required")
+        print("="*80)
+        print("\nThe following fields have been set to default values and MUST be updated")
+        print("manually in a text editor based on your workload knowledge:\n")
+        print("  • Index_Working_Set (default: 100) - Percentage of indexes in memory")
+        print("  • Data_Working_Set (default: 10) - Percentage of data in memory")
+        print("  • Inserts_Per_Day (default: 0) - Daily insert operations")
+        print("  • Updates_Per_Day (default: 0) - Daily update operations")
+        print("  • Deletes_Per_Day (default: 0) - Daily delete operations")
+        print("  • Reads_Per_Day (default: 0) - Daily read operations")
+        print("\nThese statistics cannot be calculated automatically and require knowledge")
+        print("of your existing workload patterns. Open the CSV file in a text editor")
+        print("and update these values for accurate sizing recommendations.")
+        print("="*80 + "\n")
+        
     except RuntimeError as e:
-        print(str(e))
-        return
-    
-    # Generate sizing CSV by combining compression data with MongoDB stats
-    output_filename = generate_sizing_csv(comp_data, args.uri)
-    
-    # Clean up the compression-review CSV file
-    try:
-        os.remove(compression_csv)
-        print(f"Cleaned up temporary file: {compression_csv}")
-    except Exception as e:
-        print(f"Warning: Could not remove temporary file {compression_csv}: {e}")
-    
-    print(f"\nSizing CSV generated: {output_filename}")
-    print("\n" + "="*80)
-    print("IMPORTANT: Manual Updates Required")
-    print("="*80)
-    print("\nThe following fields have been set to default values and MUST be updated")
-    print("manually in a text editor based on your workload knowledge:\n")
-    print("  • Index_Working_Set (default: 100%) - Percentage of indexes in memory")
-    print("  • Data_Working_Set (default: 10%) - Percentage of data in memory")
-    print("  • Inserts_Per_Day (default: 0) - Daily insert operations")
-    print("  • Updates_Per_Day (default: 0) - Daily update operations")
-    print("  • Deletes_Per_Day (default: 0) - Daily delete operations")
-    print("  • Reads_Per_Day (default: 0) - Daily read operations")
-    print("\nThese statistics cannot be calculated automatically and require knowledge")
-    print("of your existing workload patterns. Open the CSV file in a text editor")
-    print("and update these values for accurate sizing recommendations.")
-    print("="*80 + "\n")
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        # Clean up the compression-review CSV file if it was created
+        if compression_csv is not None:
+            cleanup_csv_files([compression_csv])
 
 if __name__ == "__main__":
     main()
